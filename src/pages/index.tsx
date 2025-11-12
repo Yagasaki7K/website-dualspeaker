@@ -29,10 +29,6 @@ const ICE_SERVERS: RTCIceServer[] = [
 	{ urls: "stun:stun1.l.google.com:19302" },
 ];
 
-type AudioEncodingParameters = RTCRtpEncodingParameters & {
-	dtx?: "enabled" | "disabled";
-};
-
 const AUDIO_CONSTRAINTS: MediaStreamConstraints = {
 	audio: {
 		channelCount: 1,
@@ -208,10 +204,9 @@ export default function Home() {
 			params.encodings = [{}];
 		}
 
-                const encoding = params.encodings[0] as AudioEncodingParameters;
-                encoding.maxBitrate = 24000; // ~24 kbps para redes 3G
-                encoding.dtx = "enabled";
-                encoding.priority = "medium";
+		params.encodings[0].maxBitrate = 24000; // ~24 kbps para redes 3G
+		params.encodings[0].dtx = "enabled";
+		params.encodings[0].priority = "medium";
 
 		sender.setParameters(params).catch((err) => {
 			console.warn("Não foi possível aplicar limitações de banda: ", err);
