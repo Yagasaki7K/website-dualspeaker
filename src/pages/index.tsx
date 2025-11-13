@@ -24,6 +24,10 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getDatabase(app);
 
+type ExtendedRtpEncodingParameters = RTCRtpEncodingParameters & {
+        dtx?: "enabled" | "disabled";
+};
+
 const ICE_SERVERS: RTCIceServer[] = [
 	{ urls: "stun:stun.l.google.com:19302" },
 	{ urls: "stun:stun1.l.google.com:19302" },
@@ -199,14 +203,15 @@ export default function Home() {
 
 		if (!sender) return;
 
-		const params = sender.getParameters();
-		if (!params.encodings || params.encodings.length === 0) {
-			params.encodings = [{}];
-		}
+                const params = sender.getParameters();
+                if (!params.encodings || params.encodings.length === 0) {
+                        params.encodings = [{}];
+                }
 
-		params.encodings[0].maxBitrate = 24000; // ~24 kbps para redes 3G
-		params.encodings[0].dtx = "enabled";
-		params.encodings[0].priority = "medium";
+                const encoding = params.encodings[0] as ExtendedRtpEncodingParameters;
+                encoding.maxBitrate = 24000; // ~24 kbps para redes 3G
+                encoding.dtx = "enabled";
+                encoding.priority = "medium";
 
 		sender.setParameters(params).catch((err) => {
 			console.warn("Não foi possível aplicar limitações de banda: ", err);
