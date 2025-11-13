@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-	get,
-	getDatabase,
-	onValue,
-	push,
-	ref,
-	remove,
-	set,
+        get,
+        getDatabase,
+        onDisconnect,
+        onValue,
+        push,
+        ref,
+        remove,
+        set,
 } from "firebase/database";
 import { initializeApp } from "firebase/app";
 import Head from "next/head";
@@ -124,21 +125,65 @@ const MicrophoneStatus = styled.div`
   border-radius: 0.5rem;
 `;
 
+const RoomInfoCard = styled.section`
+  margin-top: 1.5rem;
+  padding: 1rem 1.25rem;
+  border-radius: 0.75rem;
+  background: #edf2f7;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  color: #2d3748;
+`;
+
+const InfoRow = styled.div`
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: baseline;
+`;
+
+const Badge = styled.span`
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.75rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  background-color: #4299e1;
+  color: #fff;
+`;
+
+const RemoteAudioContainer = styled.section`
+  margin-top: 2rem;
+  padding: 1rem 1.25rem;
+  border-radius: 0.75rem;
+  background-color: #fefcbf;
+  color: #744210;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+`;
+
 export default function Home() {
-	const [roomId, setRoomId] = useState("");
-	const [inCall, setInCall] = useState(false);
-	const [isMicrophoneActive, setIsMicrophoneActive] = useState(false);
-	const [error, setError] = useState<string | null>(null);
-	const [statusMessage, setStatusMessage] = useState<string | null>(null);
-	const [isRoomCreator, setIsRoomCreator] = useState(false);
-	const localStreamRef = useRef<MediaStream | null>(null);
-	const peerConnection = useRef<RTCPeerConnection | null>(null);
-	const audioContext = useRef<AudioContext | null>(null);
-	const analyser = useRef<AnalyserNode | null>(null);
-	const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
-	const connectionSubscriptions = useRef<Array<() => void>>([]);
-	const roomIdRef = useRef(roomId);
-	const hasLocalStream = Boolean(localStreamRef.current);
+        const [roomId, setRoomId] = useState("");
+        const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
+        const [inCall, setInCall] = useState(false);
+        const [isMicrophoneActive, setIsMicrophoneActive] = useState(false);
+        const [error, setError] = useState<string | null>(null);
+        const [statusMessage, setStatusMessage] = useState<string | null>(null);
+        const [isRoomCreator, setIsRoomCreator] = useState(false);
+        const [participantsCount, setParticipantsCount] = useState(0);
+        const localStreamRef = useRef<MediaStream | null>(null);
+        const peerConnection = useRef<RTCPeerConnection | null>(null);
+        const audioContext = useRef<AudioContext | null>(null);
+        const analyser = useRef<AnalyserNode | null>(null);
+        const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+        const connectionSubscriptions = useRef<Array<() => void>>([]);
+        const roomIdRef = useRef(roomId);
+        const participantKeyRef = useRef<string | null>(null);
+        const participantsListenerRef = useRef<(() => void) | null>(null);
+        const hasLocalStream = Boolean(localStreamRef.current);
 
 	const initializeAudioContext = () => {
 		if (!audioContext.current) {
@@ -158,14 +203,19 @@ export default function Home() {
 		setIsMicrophoneActive(average > 10);
 	}, []);
 
-	const clearSubscriptions = useCallback(() => {
-		connectionSubscriptions.current.forEach((unsubscribe) => unsubscribe());
-		connectionSubscriptions.current = [];
-	}, []);
+        const clearSubscriptions = useCallback(() => {
+                connectionSubscriptions.current.forEach((unsubscribe) => unsubscribe());
+                connectionSubscriptions.current = [];
 
-	const cleanupConnection = useCallback(
-		async (removeRoomData = false, targetRoomId?: string) => {
-			clearSubscriptions();
+                if (participantsListenerRef.current) {
+                        participantsListenerRef.current();
+                        participantsListenerRef.current = null;
+                }
+        }, []);
+
+        const cleanupConnection = useCallback(
+                async (removeRoomData = false, targetRoomId?: string) => {
+                        clearSubscriptions();
 
 			if (peerConnection.current) {
 				peerConnection.current.onicecandidate = null;
@@ -180,17 +230,34 @@ export default function Home() {
 			}
 
 			setInCall(false);
-			setStatusMessage(null);
-			setIsRoomCreator(false);
+                        setStatusMessage(null);
+                        setIsRoomCreator(false);
+                        setActiveRoomId(null);
+                        setParticipantsCount(0);
 
-			const roomToClear = targetRoomId ?? roomIdRef.current;
+                        const roomToClear = targetRoomId ?? roomIdRef.current;
 
-			if (removeRoomData && roomToClear) {
-				try {
-					await remove(ref(db, `rooms/${roomToClear}`));
-				} catch (err) {
-					console.warn("Não foi possível limpar a sala:", err);
-				}
+                        if (roomToClear && participantKeyRef.current) {
+                                try {
+                                        await remove(
+                                                ref(
+                                                        db,
+                                                        `rooms/${roomToClear}/participants/${participantKeyRef.current}`,
+                                                ),
+                                        );
+                                } catch (err) {
+                                        console.warn("Não foi possível remover participante:", err);
+                                } finally {
+                                        participantKeyRef.current = null;
+                                }
+                        }
+
+                        if (removeRoomData && roomToClear) {
+                                try {
+                                        await remove(ref(db, `rooms/${roomToClear}`));
+                                } catch (err) {
+                                        console.warn("Não foi possível limpar a sala:", err);
+                                }
 			}
 		},
 		[clearSubscriptions],
@@ -284,12 +351,48 @@ export default function Home() {
 		[],
 	);
 
-	const createRoom = useCallback(async () => {
-		const trimmedRoomId = roomId.trim();
+        const registerParticipant = useCallback(
+                async (roomKey: string) => {
+                        try {
+                                const participantsRef = ref(db, `rooms/${roomKey}/participants`);
+                                const participantRef = push(participantsRef);
 
-		if (!trimmedRoomId) {
-			setError("Por favor, insira um ID de sala");
-			return;
+                                if (!participantRef.key) {
+                                        throw new Error("Identificador de participante inválido");
+                                }
+
+                                participantKeyRef.current = participantRef.key;
+                                await set(participantRef, { joinedAt: Date.now() });
+                                void onDisconnect(participantRef).remove();
+
+                                if (participantsListenerRef.current) {
+                                        participantsListenerRef.current();
+                                }
+
+                                participantsListenerRef.current = onValue(
+                                        participantsRef,
+                                        (snapshot) => {
+                                                const participants = snapshot.val() as Record<string, unknown> | null;
+                                                const count = participants ? Object.keys(participants).length : 0;
+                                                setParticipantsCount(count);
+                                        },
+                                );
+
+                                setParticipantsCount((current) => (current === 0 ? 1 : current));
+                        } catch (err) {
+                                console.error("Erro ao registrar participante", err);
+                                throw err;
+                        }
+                },
+                [],
+        );
+
+        const createRoom = useCallback(async () => {
+                const trimmedRoomId = roomId.trim();
+
+                if (!trimmedRoomId) {
+                        setError("Por favor, insira um ID de sala");
+                        return;
 		}
 
 		if (!localStreamRef.current) {
@@ -317,15 +420,16 @@ export default function Home() {
 			});
 			await pc.setLocalDescription(offer);
 
-			await set(ref(db, `rooms/${trimmedRoomId}/offer`), offer);
-			setInCall(true);
-			setIsRoomCreator(true);
-			setStatusMessage("Sala criada. Aguardando outro participante...");
+                        await set(ref(db, `rooms/${trimmedRoomId}/offer`), offer);
+                        setInCall(true);
+                        setIsRoomCreator(true);
+                        setStatusMessage("Sala criada. Aguardando outro participante...");
+                        setActiveRoomId(trimmedRoomId);
 
-			const answerUnsubscribe = onValue(
-				ref(db, `rooms/${trimmedRoomId}/answer`),
-				async (snapshot) => {
-					const answer = snapshot.val();
+                        const answerUnsubscribe = onValue(
+                                ref(db, `rooms/${trimmedRoomId}/answer`),
+                                async (snapshot) => {
+                                        const answer = snapshot.val();
 					if (
 						answer &&
 						peerConnection.current &&
@@ -351,13 +455,25 @@ export default function Home() {
 				},
 			);
 
-			connectionSubscriptions.current.push(answerUnsubscribe);
-			connectionSubscriptions.current.push(candidatesUnsubscribe);
-		} catch (err) {
-			setError("Erro ao criar sala: " + (err as Error).message);
-			await cleanupConnection(true, trimmedRoomId);
-		}
-	}, [attachLocalStreamToPeer, buildPeerConnection, cleanupConnection, roomId]);
+                        connectionSubscriptions.current.push(answerUnsubscribe);
+                        connectionSubscriptions.current.push(candidatesUnsubscribe);
+
+                        try {
+                                await registerParticipant(trimmedRoomId);
+                        } catch (err) {
+                                setError("Não foi possível registrar sua presença na sala");
+                        }
+                } catch (err) {
+                        setError("Erro ao criar sala: " + (err as Error).message);
+                        await cleanupConnection(true, trimmedRoomId);
+                }
+        }, [
+                attachLocalStreamToPeer,
+                buildPeerConnection,
+                cleanupConnection,
+                registerParticipant,
+                roomId,
+        ]);
 
 	const joinRoom = useCallback(async () => {
 		const trimmedRoomId = roomId.trim();
@@ -401,16 +517,17 @@ export default function Home() {
 				offerToReceiveVideo: false,
 			});
 			await pc.setLocalDescription(answer);
-			await set(ref(db, `rooms/${trimmedRoomId}/answer`), answer);
+                        await set(ref(db, `rooms/${trimmedRoomId}/answer`), answer);
 
-			setInCall(true);
-			setIsRoomCreator(false);
-			setStatusMessage("Sala encontrada. Conectando...");
+                        setInCall(true);
+                        setIsRoomCreator(false);
+                        setStatusMessage("Sala encontrada. Conectando...");
+                        setActiveRoomId(trimmedRoomId);
 
-			const callerCandidatesUnsubscribe = onValue(
-				ref(db, `rooms/${trimmedRoomId}/callerCandidates`),
-				(snapshot) => {
-					const candidates = snapshot.val();
+                        const callerCandidatesUnsubscribe = onValue(
+                                ref(db, `rooms/${trimmedRoomId}/callerCandidates`),
+                                (snapshot) => {
+                                        const candidates = snapshot.val();
 					if (candidates && peerConnection.current) {
 						Object.values(candidates).forEach((candidate: any) => {
 							peerConnection.current?.addIceCandidate(
@@ -419,14 +536,26 @@ export default function Home() {
 						});
 					}
 				},
-			);
+                        );
 
-			connectionSubscriptions.current.push(callerCandidatesUnsubscribe);
-		} catch (err) {
-			setError("Erro ao entrar na sala: " + (err as Error).message);
-			await cleanupConnection(false, trimmedRoomId);
-		}
-	}, [attachLocalStreamToPeer, buildPeerConnection, cleanupConnection, roomId]);
+                        connectionSubscriptions.current.push(callerCandidatesUnsubscribe);
+
+                        try {
+                                await registerParticipant(trimmedRoomId);
+                        } catch (err) {
+                                setError("Não foi possível registrar sua presença na sala");
+                        }
+                } catch (err) {
+                        setError("Erro ao entrar na sala: " + (err as Error).message);
+                        await cleanupConnection(false, trimmedRoomId);
+                }
+        }, [
+                attachLocalStreamToPeer,
+                buildPeerConnection,
+                cleanupConnection,
+                registerParticipant,
+                roomId,
+        ]);
 
 	const leaveRoom = useCallback(async () => {
 		setError(null);
@@ -523,22 +652,50 @@ export default function Home() {
 				)}
 
 				{error && <StatusMessage type="error">{error}</StatusMessage>}
-				{statusMessage && !error && (
-					<StatusMessage type="success">{statusMessage}</StatusMessage>
-				)}
+                                {statusMessage && !error && (
+                                        <StatusMessage type="success">{statusMessage}</StatusMessage>
+                                )}
 
-				<audio
-					ref={remoteAudioRef}
-					autoPlay
-					playsInline
-					style={{ display: "none" }}
-					aria-hidden="true"
-				/>
+                                {activeRoomId && (
+                                        <RoomInfoCard>
+                                                <InfoRow>
+                                                        <strong>Sala atual:</strong>
+                                                        <span>{activeRoomId}</span>
+                                                </InfoRow>
+                                                <InfoRow>
+                                                        <strong>Participantes conectados:</strong>
+                                                        <span>
+                                                                {participantsCount === 1
+                                                                        ? "1 participante"
+                                                                        : `${participantsCount} participantes`}
+                                                        </span>
+                                                </InfoRow>
+                                                <Badge>{
+                                                        isRoomCreator
+                                                                ? "Você é o anfitrião"
+                                                                : "Você é um participante"
+                                                }</Badge>
+                                        </RoomInfoCard>
+                                )}
 
-				<MicrophoneStatus>
-					<div
-						style={{
-							width: "12px",
+                                <RemoteAudioContainer>
+                                        <strong>Áudio da sala</strong>
+                                        <audio
+                                                ref={remoteAudioRef}
+                                                autoPlay
+                                                controls
+                                                playsInline
+                                        />
+                                        <small>
+                                                O áudio é reproduzido automaticamente quando outros participantes
+                                                estiverem falando.
+                                        </small>
+                                </RemoteAudioContainer>
+
+                                <MicrophoneStatus>
+                                        <div
+                                                style={{
+                                                        width: "12px",
 							height: "12px",
 							borderRadius: "50%",
 							backgroundColor: isMicrophoneActive ? "#48bb78" : "#e53e3e",
