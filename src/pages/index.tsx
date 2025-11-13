@@ -474,7 +474,7 @@ export default function Home() {
                                 if (remoteAudioRef.current && remoteStream) {
                                         remoteAudioRef.current.srcObject = remoteStream;
                                         remoteAudioRef.current.autoplay = true;
-                                        remoteAudioRef.current.playsInline = true;
+                                        remoteAudioRef.current.setAttribute("playsinline", "true");
                                         const playPromise = remoteAudioRef.current.play();
                                         if (playPromise) {
                                                 playPromise.catch(() => undefined);
