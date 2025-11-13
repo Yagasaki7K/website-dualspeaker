@@ -165,6 +165,67 @@ const RemoteAudioContainer = styled.section`
   gap: 0.75rem;
 `;
 
+const RemoteAudioStatus = styled.div`
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+`;
+
+const LevelMeter = styled.div`
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.4);
+  overflow: hidden;
+`;
+
+const LevelMeterFill = styled.div<{ level: number }>`
+  height: 100%;
+  width: ${(props) => props.level}%;
+  background: ${(props) =>
+          props.level > 60
+                  ? "#38a169"
+                  : props.level > 30
+                    ? "#dd6b20"
+                    : "#c53030"};
+  transition: width 0.2s ease, background 0.2s ease;
+`;
+
+const VolumeControl = styled.label`
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+`;
+
+const VolumeSlider = styled.input`
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: #dd6b20;
+  outline: none;
+  cursor: pointer;
+
+  &::-webkit-slider-thumb {
+    appearance: none;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #744210;
+    border: 2px solid #fefcbf;
+  }
+
+  &::-moz-range-thumb {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: #744210;
+    border: 2px solid #fefcbf;
+  }
+`;
+
 export default function Home() {
         const [roomId, setRoomId] = useState("");
         const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
@@ -174,34 +235,87 @@ export default function Home() {
         const [statusMessage, setStatusMessage] = useState<string | null>(null);
         const [isRoomCreator, setIsRoomCreator] = useState(false);
         const [participantsCount, setParticipantsCount] = useState(0);
+        const [remoteVolume, setRemoteVolume] = useState(100);
+        const [remoteLevel, setRemoteLevel] = useState(0);
+        const [isRemoteActive, setIsRemoteActive] = useState(false);
         const localStreamRef = useRef<MediaStream | null>(null);
         const peerConnection = useRef<RTCPeerConnection | null>(null);
         const audioContext = useRef<AudioContext | null>(null);
         const analyser = useRef<AnalyserNode | null>(null);
+        const remoteAnalyser = useRef<AnalyserNode | null>(null);
         const remoteAudioRef = useRef<HTMLAudioElement | null>(null);
+        const remoteSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
         const connectionSubscriptions = useRef<Array<() => void>>([]);
         const roomIdRef = useRef(roomId);
         const participantKeyRef = useRef<string | null>(null);
         const participantsListenerRef = useRef<(() => void) | null>(null);
+        const remoteActivityInterval = useRef<number | null>(null);
+        const remoteStreamRef = useRef<MediaStream | null>(null);
         const hasLocalStream = Boolean(localStreamRef.current);
 
-	const initializeAudioContext = () => {
-		if (!audioContext.current) {
-			audioContext.current = new AudioContext();
-			analyser.current = audioContext.current.createAnalyser();
-			analyser.current.fftSize = 256;
-		}
-	};
+        const initializeAudioContext = useCallback(() => {
+                if (!audioContext.current) {
+                        audioContext.current = new AudioContext();
+                        analyser.current = audioContext.current.createAnalyser();
+                        analyser.current.fftSize = 256;
+                }
+        }, []);
 
-	const checkMicrophoneActivity = useCallback(() => {
-		if (!analyser.current || !localStreamRef.current) return;
+        const checkMicrophoneActivity = useCallback(() => {
+                if (!analyser.current || !localStreamRef.current) return;
 
-		const dataArray = new Uint8Array(analyser.current.frequencyBinCount);
-		analyser.current.getByteFrequencyData(dataArray);
+                const dataArray = new Uint8Array(analyser.current.frequencyBinCount);
+                analyser.current.getByteFrequencyData(dataArray);
 
-		const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
-		setIsMicrophoneActive(average > 10);
-	}, []);
+                const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+                setIsMicrophoneActive(average > 10);
+        }, []);
+
+        const setupRemoteAudioMonitoring = useCallback(
+                (stream: MediaStream) => {
+                        initializeAudioContext();
+
+                        if (!audioContext.current) {
+                                return;
+                        }
+
+                        remoteStreamRef.current = stream;
+
+                        if (remoteActivityInterval.current) {
+                                window.clearInterval(remoteActivityInterval.current);
+                                remoteActivityInterval.current = null;
+                        }
+
+                        if (remoteSourceRef.current) {
+                                remoteSourceRef.current.disconnect();
+                                remoteSourceRef.current = null;
+                        }
+
+                        remoteAnalyser.current = audioContext.current.createAnalyser();
+                        remoteAnalyser.current.fftSize = 256;
+
+                        remoteSourceRef.current = audioContext.current.createMediaStreamSource(stream);
+                        remoteSourceRef.current.connect(remoteAnalyser.current);
+
+                        const dataArray = new Uint8Array(remoteAnalyser.current.frequencyBinCount);
+
+                        remoteActivityInterval.current = window.setInterval(() => {
+                                if (!remoteAnalyser.current) {
+                                        return;
+                                }
+
+                                remoteAnalyser.current.getByteFrequencyData(dataArray);
+                                const average =
+                                        dataArray.reduce((accumulator, value) => accumulator + value, 0) /
+                                        dataArray.length;
+                                const normalized = Math.min(100, Math.round((average / 255) * 100));
+
+                                setRemoteLevel(normalized);
+                                setIsRemoteActive(normalized > 5);
+                        }, 180);
+                },
+                [initializeAudioContext],
+        );
 
         const clearSubscriptions = useCallback(() => {
                 connectionSubscriptions.current.forEach((unsubscribe) => unsubscribe());
@@ -225,11 +339,27 @@ export default function Home() {
 				peerConnection.current = null;
 			}
 
-			if (remoteAudioRef.current) {
-				remoteAudioRef.current.srcObject = null;
-			}
+                        if (remoteAudioRef.current) {
+                                remoteAudioRef.current.srcObject = null;
+                        }
 
-			setInCall(false);
+                        if (remoteActivityInterval.current) {
+                                window.clearInterval(remoteActivityInterval.current);
+                                remoteActivityInterval.current = null;
+                        }
+
+                        if (remoteSourceRef.current) {
+                                remoteSourceRef.current.disconnect();
+                                remoteSourceRef.current = null;
+                        }
+
+                        remoteAnalyser.current = null;
+                        remoteStreamRef.current = null;
+                        setRemoteLevel(0);
+                        setIsRemoteActive(false);
+                        setRemoteVolume(100);
+
+                        setInCall(false);
                         setStatusMessage(null);
                         setIsRoomCreator(false);
                         setActiveRoomId(null);
@@ -298,11 +428,11 @@ export default function Home() {
 		return true;
 	}, [applyAudioBandwidthConstraints]);
 
-	const buildPeerConnection = useCallback(
-		(
-			roomKey: string,
-			candidateKey: "callerCandidates" | "calleeCandidates",
-		) => {
+        const buildPeerConnection = useCallback(
+                (
+                        roomKey: string,
+                        candidateKey: "callerCandidates" | "calleeCandidates",
+                ) => {
 			const pc = new RTCPeerConnection({
 				iceServers: ICE_SERVERS,
 				bundlePolicy: "max-bundle",
@@ -339,17 +469,24 @@ export default function Home() {
 				}
 			};
 
-			pc.ontrack = (event) => {
-				const [remoteStream] = event.streams;
-				if (remoteAudioRef.current && remoteStream) {
-					remoteAudioRef.current.srcObject = remoteStream;
-				}
-			};
+                        pc.ontrack = (event) => {
+                                const [remoteStream] = event.streams;
+                                if (remoteAudioRef.current && remoteStream) {
+                                        remoteAudioRef.current.srcObject = remoteStream;
+                                        remoteAudioRef.current.autoplay = true;
+                                        remoteAudioRef.current.playsInline = true;
+                                        const playPromise = remoteAudioRef.current.play();
+                                        if (playPromise) {
+                                                playPromise.catch(() => undefined);
+                                        }
+                                        setupRemoteAudioMonitoring(remoteStream);
+                                }
+                        };
 
-			return pc;
-		},
-		[],
-	);
+                        return pc;
+                },
+                [setupRemoteAudioMonitoring],
+        );
 
         const registerParticipant = useCallback(
                 async (roomKey: string) => {
@@ -557,74 +694,152 @@ export default function Home() {
                 roomId,
         ]);
 
-	const leaveRoom = useCallback(async () => {
-		setError(null);
-		const trimmedRoomId = roomId.trim();
-		await cleanupConnection(isRoomCreator, trimmedRoomId || undefined);
-		setStatusMessage("Chamada encerrada");
-	}, [cleanupConnection, isRoomCreator, roomId]);
+        const leaveRoom = useCallback(async () => {
+                setError(null);
+                const trimmedRoomId = roomId.trim();
+                await cleanupConnection(isRoomCreator, trimmedRoomId || undefined);
+                setStatusMessage("Chamada encerrada");
+        }, [cleanupConnection, isRoomCreator, roomId]);
 
-	useEffect(() => {
-		roomIdRef.current = roomId;
-	}, [roomId]);
+        useEffect(() => {
+                roomIdRef.current = roomId;
+        }, [roomId]);
 
-	useEffect(() => {
-		let activityInterval: number | null = null;
+        useEffect(() => {
+                if (remoteAudioRef.current) {
+                        remoteAudioRef.current.volume = remoteVolume / 100;
+                }
+        }, [remoteVolume]);
 
-		const getAudio = async () => {
-			try {
-				const stream =
-					await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS);
+        useEffect(() => {
+                let activityInterval: number | null = null;
 
-				localStreamRef.current = stream;
-				initializeAudioContext();
+                const getAudio = async () => {
+                        try {
+                                const stream =
+                                        await navigator.mediaDevices.getUserMedia(AUDIO_CONSTRAINTS);
 
-				if (audioContext.current && analyser.current) {
-					const source = audioContext.current.createMediaStreamSource(stream);
-					source.connect(analyser.current);
-				}
+                                localStreamRef.current = stream;
+                                initializeAudioContext();
 
-				activityInterval = window.setInterval(checkMicrophoneActivity, 120);
-				setStatusMessage("Microfone pronto para uso");
-			} catch (err) {
-				setError("Erro ao acessar o microfone: " + (err as Error).message);
-			}
-		};
+                                if (audioContext.current && analyser.current) {
+                                        const source = audioContext.current.createMediaStreamSource(stream);
+                                        source.connect(analyser.current);
+                                }
 
-		void getAudio();
+                                activityInterval = window.setInterval(checkMicrophoneActivity, 120);
+                                setStatusMessage("Microfone pronto para uso");
+                        } catch (err) {
+                                setError("Erro ao acessar o microfone: " + (err as Error).message);
+                        }
+                };
 
-		return () => {
-			if (activityInterval) {
-				window.clearInterval(activityInterval);
-			}
+                void getAudio();
 
-			localStreamRef.current?.getTracks().forEach((track) => track.stop());
-			localStreamRef.current = null;
+                return () => {
+                        if (activityInterval) {
+                                window.clearInterval(activityInterval);
+                        }
 
-			if (audioContext.current) {
-				audioContext.current.close();
-				audioContext.current = null;
-			}
+                        localStreamRef.current?.getTracks().forEach((track) => track.stop());
+                        localStreamRef.current = null;
 
-			void cleanupConnection();
-		};
-	}, [checkMicrophoneActivity, cleanupConnection]);
+                        if (audioContext.current) {
+                                audioContext.current.close();
+                                audioContext.current = null;
+                        }
 
-	return (
-		<>
-			<Head>
-				<title>Áudio P2P</title>
-				<meta name="viewport" content="width=device-width, initial-scale=1" />
-				<link rel="manifest" href="/manifest.json" />
-				<meta name="theme-color" content="#ffffff" />
-			</Head>
-			<Container>
-				<Title>P2P Áudio Chat</Title>
-				<Input
-					type="text"
-					placeholder="Digite o ID da sala"
-					value={roomId}
-					onChange={(e) => setRoomId(e.target.value)}
+                        void cleanupConnection();
+                };
+        }, [
+                checkMicrophoneActivity,
+                cleanupConnection,
+                initializeAudioContext,
+        ]);
+
+        useEffect(() => {
+                if (typeof document === "undefined") {
+                        return;
+                }
+
+                const handleVisibilityChange = () => {
+                        if (!document.hidden) {
+                                if (audioContext.current?.state === "suspended") {
+                                        void audioContext.current.resume().catch(() => undefined);
+                                }
+
+                                if (remoteAudioRef.current && remoteStreamRef.current) {
+                                        const playPromise = remoteAudioRef.current.play();
+                                        if (playPromise) {
+                                                playPromise.catch(() => undefined);
+                                        }
+                                }
+                        }
+                };
+
+                document.addEventListener("visibilitychange", handleVisibilityChange);
+
+                return () => {
+                        document.removeEventListener("visibilitychange", handleVisibilityChange);
+                };
+        }, []);
+
+        useEffect(() => {
+                if (!("mediaSession" in navigator)) {
+                        return;
+                }
+
+                const mediaSession = navigator.mediaSession;
+
+                if (inCall && activeRoomId) {
+                        mediaSession.metadata = new MediaMetadata({
+                                title: `P2P Áudio Chat (${activeRoomId})`,
+                                artist: isRoomCreator ? "Anfitrião" : "Participante",
+                                album: "DualSpeaker",
+                        });
+                        mediaSession.playbackState = "playing";
+                        mediaSession.setActionHandler("play", () => {
+                                if (remoteAudioRef.current) {
+                                        const playPromise = remoteAudioRef.current.play();
+                                        if (playPromise) {
+                                                playPromise.catch(() => undefined);
+                                        }
+                                }
+                        });
+                        mediaSession.setActionHandler("pause", () => {
+                                remoteAudioRef.current?.pause();
+                        });
+                        mediaSession.setActionHandler("stop", () => {
+                                void leaveRoom();
+                        });
+                } else {
+                        mediaSession.metadata = null;
+                        mediaSession.playbackState = "none";
+                        mediaSession.setActionHandler("play", null);
+                        mediaSession.setActionHandler("pause", null);
+                        mediaSession.setActionHandler("stop", null);
+                }
+        }, [activeRoomId, inCall, isRoomCreator, leaveRoom]);
+
+        const pageTitle = activeRoomId
+                ? `P2P Áudio Chat (${activeRoomId})`
+                : "P2P Áudio Chat";
+
+        return (
+                <>
+                        <Head>
+                                <title>{pageTitle}</title>
+                                <meta name="viewport" content="width=device-width, initial-scale=1" />
+                                <link rel="manifest" href="/manifest.json" />
+                                <meta name="theme-color" content="#ffffff" />
+                        </Head>
+                        <Container>
+                                <Title>{pageTitle}</Title>
+                                <Input
+                                        type="text"
+                                        placeholder="Digite o ID da sala"
+                                        value={roomId}
+                                        onChange={(e) => setRoomId(e.target.value)}
 				/>
 				<ButtonGroup>
 					<Button
@@ -683,12 +898,40 @@ export default function Home() {
                                         <audio
                                                 ref={remoteAudioRef}
                                                 autoPlay
-                                                controls
                                                 playsInline
+                                                style={{ display: "none" }}
                                         />
+                                        <RemoteAudioStatus>
+                                                <LevelMeter>
+                                                        <LevelMeterFill level={remoteLevel} />
+                                                </LevelMeter>
+                                                <span>
+                                                        {isRemoteActive
+                                                                ? "Recebendo áudio da sala"
+                                                                : "Sala silenciosa no momento"}
+                                                </span>
+                                        </RemoteAudioStatus>
+                                        <VolumeControl htmlFor="remote-volume">
+                                                Volume da sala
+                                                <VolumeSlider
+                                                        id="remote-volume"
+                                                        type="range"
+                                                        min={0}
+                                                        max={100}
+                                                        step={1}
+                                                        value={remoteVolume}
+                                                        onChange={(event) =>
+                                                                setRemoteVolume(Number(event.target.value))
+                                                        }
+                                                        aria-valuemin={0}
+                                                        aria-valuemax={100}
+                                                        aria-valuenow={remoteVolume}
+                                                        aria-label="Controle de volume da sala"
+                                                />
+                                        </VolumeControl>
                                         <small>
-                                                O áudio é reproduzido automaticamente quando outros participantes
-                                                estiverem falando.
+                                                O áudio continua ativo em segundo plano, mesmo com a tela
+                                                bloqueada, garantindo comunicação constante.
                                         </small>
                                 </RemoteAudioContainer>
 
